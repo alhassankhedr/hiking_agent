@@ -4,38 +4,62 @@ import json
 def get_parks(api_key, state_code, country=None, latitude=None, longitude=None):
     """
     Fetches park data from the appropriate API based on country.
-    For US: National Park Service API
-    For Canada: OpenStreetMap Overpass API
+
+    Routes to the correct API based on country code:
+    - US: Uses National Park Service (NPS) API
+    - Canada and other countries: Uses OpenStreetMap Overpass API
 
     Args:
-        api_key (str): The API key for the NPS API (required for US).
-        state_code (str): The two-letter state/province code.
-        country (str): The country code (e.g., 'US', 'CA').
-        latitude (float): Latitude for location-based search (for Canada).
-        longitude (float): Longitude for location-based search (for Canada).
+        api_key (str): The API key for the NPS API. Required for US searches.
+        state_code (str): The two-letter state/province code (e.g., 'CA', 'NY').
+        country (str, optional): The country code (e.g., 'US', 'CA').
+            If None and state_code is a US state, defaults to US.
+        latitude (float, optional): Latitude for location-based search.
+            Required for non-US searches (Canada and others).
+        longitude (float, optional): Longitude for location-based search.
+            Required for non-US searches (Canada and others).
 
     Returns:
-        dict: A dictionary containing the API response with park data, 
-              or None if an error occurs.
+        dict or None: A dictionary containing the API response with park data.
+            The response includes a 'data' key with a list of park dictionaries.
+            Each park dict contains 'fullName', 'parkCode', 'latitude', 'longitude'.
+            Returns None if required parameters are missing or if an error occurs.
+
+    Example:
+        >>> parks = get_parks(api_key, "CA", country="US")
+        >>> print(parks['data'][0]['fullName'])
+        "Yosemite National Park"
     """
     us_states = ['AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY', 'DC']
     
-    # Check if it's Canada
-    if country == 'CA':
-        # Use OpenStreetMap for Canada
+    if country == 'CA' or (country != 'US' and state_code not in us_states):
+        if latitude is None or longitude is None:
+            return None
         return get_parks_canada(latitude, longitude, state_code)
-    elif country == 'US' or (country is None and state_code in us_states):
-        # Use NPS API for US
-        return get_parks_us(api_key, state_code)
     else:
-        # Default to OpenStreetMap for other countries or unknown
-        return get_parks_canada(latitude, longitude, state_code)
+        if not api_key:
+            return None
+        return get_parks_us(api_key, state_code)
 
 def get_parks_us(api_key, state_code):
-    """Fetches park data from the National Park Service (NPS) API for a given state."""
+    """
+    Fetches park data from the National Park Service (NPS) API for a given state.
+
+    Args:
+        api_key (str): The NPS API key obtained from developer.nps.gov.
+        state_code (str): Two-letter US state code (e.g., 'CA', 'NY', 'TX').
+
+    Returns:
+        dict or None: A dictionary containing the NPS API response with park data.
+            The response includes a 'data' key with a list of park dictionaries.
+            Returns None if the API request fails or if parameters are invalid.
+
+    Raises:
+        No exceptions are raised. All errors are caught and None is returned.
+    """
     url = f"https://developer.nps.gov/api/v1/parks?stateCode={state_code}&api_key={api_key}"
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -45,16 +69,33 @@ def get_parks_us(api_key, state_code):
 def get_parks_canada(latitude, longitude, province=None):
     """
     Fetches national parks in Canada using OpenStreetMap Overpass API.
-    
+
+    Searches for national parks within 150km of the specified coordinates.
+    Tries multiple Overpass API servers for reliability. Converts OpenStreetMap
+    data format to match the NPS API format for consistency.
+
     Args:
-        latitude (float): Latitude for location-based search.
-        longitude (float): Longitude for location-based search.
-        province (str): Optional province name for filtering.
-    
+        latitude (float): Latitude coordinate for location-based search (-90 to 90).
+        longitude (float): Longitude coordinate for location-based search (-180 to 180).
+        province (str, optional): Province name for filtering. Currently not used
+            in the query but kept for future enhancement.
+
     Returns:
-        dict: A dictionary in NPS-like format with park data, or None if an error occurs.
+        dict or None: A dictionary in NPS-like format with park data.
+            The response includes a 'data' key with a list of park dictionaries.
+            Each park dict contains 'fullName', 'parkCode', 'latitude', 'longitude',
+            and 'description'. Returns None if coordinates are invalid or if
+            the API request fails.
+
+    Raises:
+        No exceptions are raised. All errors are caught and None is returned.
     """
-    if not latitude or not longitude:
+    try:
+        latitude = float(latitude)
+        longitude = float(longitude)
+        if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
+            return None
+    except (ValueError, TypeError):
         return None
     
     # Search radius: 150km around the location (reduced from 200km for better performance)
@@ -82,40 +123,44 @@ def get_parks_canada(latitude, longitude, province=None):
             response.raise_for_status()
             data = response.json()
             break
-        except (requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
-            if overpass_url == overpass_servers[-1]:  # Last server, raise error
-                print(f"Error fetching Canadian parks data from all servers: {e}")
+        except requests.exceptions.RequestException:
+            if overpass_url == overpass_servers[-1]:
+                print("Error fetching Canadian parks data.")
                 return None
-            continue  # Try next server
+            continue
     
-    if not data:
+    if not data or not isinstance(data, dict):
         return None
     
     try:
-        # Convert OpenStreetMap format to NPS-like format
         parks = []
         for element in data.get('elements', []):
-            if 'tags' in element:
-                tags = element['tags']
-                park_name = tags.get('name', 'Unnamed Park')
-                
-                # Get coordinates
-                if 'center' in element:
-                    lat = element['center']['lat']
-                    lon = element['center']['lon']
-                elif 'lat' in element and 'lon' in element:
-                    lat = element['lat']
-                    lon = element['lon']
-                else:
-                    continue
-                
-                parks.append({
-                    'fullName': park_name,
-                    'parkCode': park_name.replace(' ', '').replace("'", "")[:10].upper(),
-                    'latitude': str(lat),
-                    'longitude': str(lon),
-                    'description': tags.get('description', tags.get('wikipedia', '')),
-                })
+            if not isinstance(element, dict) or 'tags' not in element:
+                continue
+            
+            tags = element.get('tags', {})
+            park_name = tags.get('name')
+            if not park_name:
+                continue
+            
+            # Get coordinates
+            if 'center' in element:
+                lat = element['center'].get('lat')
+                lon = element['center'].get('lon')
+            else:
+                lat = element.get('lat')
+                lon = element.get('lon')
+            
+            if lat is None or lon is None:
+                continue
+            
+            parks.append({
+                'fullName': park_name,
+                'parkCode': park_name.replace(' ', '').replace("'", "")[:10].upper(),
+                'latitude': str(lat),
+                'longitude': str(lon),
+                'description': tags.get('description', tags.get('wikipedia', '')),
+            })
         
         return {'data': parks} if parks else None
     except Exception as e:
@@ -125,20 +170,29 @@ def get_parks_canada(latitude, longitude, province=None):
 def get_trails(api_key, park_code, country=None, park_lat=None, park_lon=None, park_name=None):
     """
     Fetches trails data from the appropriate API based on country.
-    For US: NPS API
-    For Canada: OpenStreetMap Overpass API
+
+    Routes to the correct API based on country code:
+    - US: Uses NPS API "things to do" endpoint
+    - Canada: Uses OpenStreetMap Overpass API
 
     Args:
-        api_key (str): The API key for the NPS API (required for US).
-        park_code (str): The park code for the specific park.
-        country (str): The country code (e.g., 'US', 'CA').
-        park_lat (float): Park latitude (for Canada).
-        park_lon (float): Park longitude (for Canada).
-        park_name (str): Park name (for Canada).
+        api_key (str): The API key for the NPS API. Required for US searches.
+        park_code (str): The park code for the specific park (e.g., 'YOSE' for Yosemite).
+        country (str, optional): The country code (e.g., 'US', 'CA').
+        park_lat (float, optional): Park latitude. Required for Canadian searches.
+        park_lon (float, optional): Park longitude. Required for Canadian searches.
+        park_name (str, optional): Park name. Used for Canadian searches.
 
     Returns:
-        dict: A dictionary containing the API response with trail data, 
-              or None if an error occurs.
+        dict or None: A dictionary containing the API response with trail data.
+            The response includes a 'data' key with a list of trail dictionaries.
+            Each trail dict contains 'title', 'tags', and 'description'.
+            Returns None if required parameters are missing or if an error occurs.
+
+    Example:
+        >>> trails = get_trails(api_key, "YOSE", country="US")
+        >>> print(trails['data'][0]['title'])
+        "Half Dome Trail"
     """
     if country == 'CA':
         return get_trails_canada(park_lat, park_lon, park_name)
@@ -146,10 +200,28 @@ def get_trails(api_key, park_code, country=None, park_lat=None, park_lon=None, p
         return get_trails_us(api_key, park_code)
 
 def get_trails_us(api_key, park_code):
-    """Fetches 'things to do' (including trails) from the NPS API for a specific park."""
+    """
+    Fetches 'things to do' (including trails) from the NPS API for a specific park.
+
+    The NPS API "things to do" endpoint returns various activities including
+    hiking trails, scenic drives, and other recreational activities.
+
+    Args:
+        api_key (str): The NPS API key obtained from developer.nps.gov.
+        park_code (str): The park code for the specific park (e.g., 'YOSE', 'GRCA').
+
+    Returns:
+        dict or None: A dictionary containing the NPS API response with activity data.
+            The response includes a 'data' key with a list of activity dictionaries.
+            Each activity dict contains 'title', 'tags', 'description', etc.
+            Returns None if the API request fails or if parameters are invalid.
+
+    Raises:
+        No exceptions are raised. All errors are caught and None is returned.
+    """
     url = f"https://developer.nps.gov/api/v1/thingstodo?parkCode={park_code}&api_key={api_key}"
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -159,16 +231,34 @@ def get_trails_us(api_key, park_code):
 def get_trails_canada(park_lat, park_lon, park_name):
     """
     Fetches hiking trails in a Canadian park using OpenStreetMap Overpass API.
-    
+
+    Searches for hiking routes and paths within 10km of the park coordinates.
+    Filters results to include only trails with names containing keywords like
+    'trail', 'hiking', 'hike', 'loop', or 'track'. Limits results to 20 trails
+    to prevent overwhelming responses. Tries multiple Overpass API servers
+    for reliability.
+
     Args:
-        park_lat (float): Park latitude.
-        park_lon (float): Park longitude.
-        park_name (str): Park name.
-    
+        park_lat (float): Park latitude coordinate (-90 to 90).
+        park_lon (float): Park longitude coordinate (-180 to 180).
+        park_name (str): Park name. Currently used for context but not in the query.
+
     Returns:
-        dict: A dictionary in NPS-like format with trail data, or None if an error occurs.
+        dict or None: A dictionary in NPS-like format with trail data.
+            The response includes a 'data' key with a list of trail dictionaries.
+            Each trail dict contains 'title', 'tags' (always ['hiking', 'trail']),
+            and 'description'. Returns None if coordinates are invalid or if
+            the API request fails.
+
+    Raises:
+        No exceptions are raised. All errors are caught and None is returned.
     """
-    if not park_lat or not park_lon:
+    try:
+        park_lat = float(park_lat)
+        park_lon = float(park_lon)
+        if not (-90 <= park_lat <= 90) or not (-180 <= park_lon <= 180):
+            return None
+    except (ValueError, TypeError):
         return None
     
     # Search radius: 10km around the park (reduced from 50km to avoid timeouts)
@@ -198,42 +288,39 @@ def get_trails_canada(park_lat, park_lon, park_name):
             response.raise_for_status()
             data = response.json()
             break
-        except (requests.exceptions.RequestException, requests.exceptions.Timeout) as e:
-            if overpass_url == overpass_servers[-1]:  # Last server, raise error
-                print(f"Error fetching Canadian trails data from all servers: {e}")
+        except requests.exceptions.RequestException:
+            if overpass_url == overpass_servers[-1]:
+                print("Error fetching Canadian trails data.")
                 return None
-            continue  # Try next server
+            continue
     
-    if not data:
+    if not data or not isinstance(data, dict):
         return None
     
     try:
-        
         trails = []
-        seen_trails = set()  # Avoid duplicates
-        
+        seen_trails = set()
         for element in data.get('elements', []):
-            if 'tags' in element:
-                tags = element['tags']
-                trail_name = tags.get('name', '')
+            if not isinstance(element, dict) or 'tags' not in element:
+                continue
+            
+            tags = element.get('tags', {})
+            trail_name = tags.get('name', '')
+            
+            if not trail_name or trail_name in seen_trails:
+                continue
+            
+            trail_lower = trail_name.lower()
+            if any(keyword in trail_lower for keyword in ['trail', 'hiking', 'hike', 'loop', 'track']):
+                seen_trails.add(trail_name)
+                trails.append({
+                    'title': trail_name,
+                    'tags': ['hiking', 'trail'],
+                    'description': tags.get('description', ''),
+                })
                 
-                # Skip unnamed trails and duplicates
-                if not trail_name or trail_name in seen_trails:
-                    continue
-                
-                # Filter for hiking-related trails (more specific keywords)
-                trail_lower = trail_name.lower()
-                if any(keyword in trail_lower for keyword in ['trail', 'hiking', 'hike', 'loop', 'track']):
-                    seen_trails.add(trail_name)
-                    trails.append({
-                        'title': trail_name,
-                        'tags': ['hiking', 'trail'],
-                        'description': tags.get('description', ''),
-                    })
-                    
-                    # Limit results to prevent overwhelming responses
-                    if len(trails) >= 20:
-                        break
+                if len(trails) >= 20:
+                    break
         
         return {'data': trails} if trails else None
     except Exception as e:
